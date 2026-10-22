@@ -1,0 +1,14 @@
+# Python bytecode & virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Local walk-test session recordings & personal floorplans
+sessions/
+*.csv
+
+# OS & Editor files
+.DS_Store
+Thumbs.db

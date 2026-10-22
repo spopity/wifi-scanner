@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wi-Fi House Walk-Test &amp; Coverage Scanner</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Top Navigation & Control Bar -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="pulse-dot" id="liveIndicator"></div>
+      <div>
+        <h1>Wi-Fi Walk-Test Scanner</h1>
+        <p class="subtitle" id="adapterTitle">Initializing Windows WLAN Hardware...</p>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="control-group">
+        <label for="pollSelect">Scan Rate</label>
+        <select id="pollSelect">
+          <option value="0.5">0.5s (Fast)</option>
+          <option value="1.0" selected>1.0s (Normal)</option>
+          <option value="2.0">2.0s</option>
+          <option value="5.0">5.0s</option>
+        </select>
+      </div>
+
+      <button class="btn" id="btnPause" title="Pause or resume continuous scanning">
+        Pause
+      </button>
+
+      <button class="btn" id="btnAudio" title="Play a pitch-mapped audio tone as you walk (higher pitch = stronger signal)">
+        Audio Beep: OFF
+      </button>
+
+      <button class="btn" id="btnVoice" title="Speak room signal readings, roaming alerts, and dead-zone warnings out loud">
+        Voice TTS: OFF
+      </button>
+
+      <button class="btn" id="btnDemo" title="Toggle simulated walk-test data to preview roaming and neighbor features">
+        Demo Mode: OFF
+      </button>
+
+      <div class="control-group">
+        <select id="sessionSelect" title="Load a saved walk-test session from disk">
+          <option value="">Saved Sessions...</option>
+        </select>
+        <button class="btn btn-sm" id="btnSaveSession" title="Save current walk-test snapshot to disk">
+          Save
+        </button>
+      </div>
+
+      <button class="btn btn-secondary" id="btnClearSession" title="Reset recorded history and room stats">
+        Reset History
+      </button>
+
+      <a class="btn btn-primary" href="/api/export/csv" download>
+        Export CSV
+      </a>
+      <a class="btn btn-secondary" href="/api/export/json" download>
+        Export JSON
+      </a>
+    </div>
+  </header>
+
+  <!-- Optional Banner when Windows 11 Location Services is off -->
+  <div class="location-banner hidden" id="locationBanner">
+    <div class="banner-text">
+      <strong>Windows 11 Location Privacy Notice:</strong>
+      Your live signal strength (<strong>dBm &amp; %</strong>), <strong>Channel</strong>, <strong>Band</strong>, and <strong>Link Speed</strong> are actively streaming straight from your Wi-Fi card!
+      To unlock exact AP MAC addresses (BSSID) and neighboring network lists, Windows 11 requires Location Services to be enabled.
+    </div>
+    <button class="btn btn-warning" id="btnOpenLocationSettings">
+      Open Windows Location Settings
+    </button>
+  </div>
+
+  <main class="dashboard">
+    <!-- Row 1: Giant Walk-Around HUD + Quick Room Tagging -->
+    <section class="grid-top">
+      <!-- Live Signal Gauge Card -->
+      <div class="card signal-hud-card">
+        <div class="card-header">
+          <h2>Live Signal Strength</h2>
+          <span class="quality-badge" id="qualityBadge">Measuring...</span>
+        </div>
+
+        <div class="hud-main">
+          <div class="gauge-wrap">
+            <canvas id="gaugeCanvas" width="220" height="145"></canvas>
+            <div class="gauge-readout">
+              <div class="rssi-value" id="rssiValue">-- <span class="unit">dBm</span></div>
+              <div class="pct-value" id="pctValue">--% Quality</div>
+            </div>
+          </div>
+
+          <div class="hud-metrics">
+            <div class="metric-box">
+              <span class="metric-label">Network (SSID)</span>
+              <span class="metric-val" id="ssidValue">--</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">Access Point (BSSID)</span>
+              <span class="metric-val mono" id="bssidValue">--</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">Band &amp; Channel</span>
+              <span class="metric-val" id="bandChannelValue">--</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">Link Speed (TX / RX)</span>
+              <span class="metric-val" id="linkSpeedValue">-- Mbps</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">Router / Web Ping</span>
+              <span class="metric-val mono" id="pingValue">-- / -- ms</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">Jitter &amp; Packet Loss</span>
+              <span class="metric-val mono" id="jitterLossValue">-- ms • 0%</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">Radio / PHY</span>
+              <span class="metric-val" id="radioTypeValue">--</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">Session Min / Avg / Max</span>
+              <span class="metric-val mono" id="sessionMinAvgMax">-- / -- / -- dBm</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Room / Waypoint Tagging Card -->
+      <div class="card room-tag-card">
+        <div class="card-header">
+          <div>
+            <h2>Current Room / Waypoint</h2>
+            <p class="card-hint">Tap a room as you walk through the house to tag measurements</p>
+          </div>
+          <div class="room-header-actions">
+            <div class="active-room-pill">
+              Location: <strong id="activeRoomLabel">Living Room</strong>
+            </div>
+            <button class="btn btn-primary" id="btnSpeedTest" title="Measure actual download throughput (Mbps) in the current room">
+              ⚡ Test Room Speed
+            </button>
+          </div>
+        </div>
+        <div class="speedtest-banner hidden" id="speedTestBanner"></div>
+
+        <div class="room-buttons" id="roomButtonsContainer">
+          <button class="room-btn active" data-room="Living Room">Living Room</button>
+          <button class="room-btn" data-room="Kitchen">Kitchen</button>
+          <button class="room-btn" data-room="Master Bedroom">Master Bedroom</button>
+          <button class="room-btn" data-room="Bedroom 2">Bedroom 2</button>
+          <button class="room-btn" data-room="Home Office">Home Office</button>
+          <button class="room-btn" data-room="Hallway">Hallway</button>
+          <button class="room-btn" data-room="Bathroom">Bathroom</button>
+          <button class="room-btn" data-room="Basement">Basement</button>
+          <button class="room-btn" data-room="Garage">Garage</button>
+          <button class="room-btn" data-room="Patio / Yard">Patio / Yard</button>
+        </div>
+
+        <form class="custom-room-form" id="customRoomForm">
+          <input
+            type="text"
+            id="customRoomInput"
+            placeholder="Add custom room (e.g., Upstairs Loft, Dining Room)..."
+            maxlength="40"
+          />
+          <button type="submit" class="btn btn-primary">Add &amp; Select Room</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- Row 2: Real-Time Time-Series Graph -->
+    <section class="card chart-card">
+      <div class="card-header">
+        <div>
+          <h2>Real-Time Signal History (Walk-Test Timeline)</h2>
+          <p class="card-hint">Tracks RSSI (dBm) and Link Speed (Mbps) as you move. Dashed lines mark room changes or AP roaming.</p>
+        </div>
+        <div class="chart-legend">
+          <span class="legend-item"><span class="swatch swatch-rssi"></span> RSSI (dBm)</span>
+          <span class="legend-item"><span class="swatch swatch-speed"></span> Link Speed (Mbps)</span>
+          <span class="legend-item"><span class="swatch swatch-good"></span> Good (&ge; -67 dBm)</span>
+          <span class="legend-item"><span class="swatch swatch-weak"></span> Weak (&le; -75 dBm)</span>
+        </div>
+      </div>
+      <div class="canvas-container">
+        <canvas id="timelineCanvas" width="1100" height="260"></canvas>
+      </div>
+    </section>
+
+    <!-- Row 3: Interactive 2D Floorplan Heatmap + Room Leaderboard -->
+    <section class="grid-two-col">
+      <!-- Interactive Floorplan / House Grid Heatmap -->
+      <div class="card heatmap-card">
+        <div class="card-header">
+          <div>
+            <h2>Interactive House Floorplan Heatmap</h2>
+            <p class="card-hint">Click anywhere on the map where you are standing to stamp the current live Wi-Fi signal!</p>
+          </div>
+          <div class="heatmap-actions">
+            <label class="btn btn-secondary file-upload-btn" title="Upload your own floorplan image (PNG/JPG)">
+              Upload Floorplan
+              <input type="file" id="floorplanUpload" accept="image/*" hidden />
+            </label>
+            <button class="btn btn-secondary" id="btnResetFloorplan" title="Switch back to built-in house blueprint">
+              Default Blueprint
+            </button>
+            <button class="btn btn-secondary" id="btnUndoPoint">Undo Pin</button>
+            <button class="btn btn-secondary" id="btnClearHeatmap">Clear Map</button>
+          </div>
+        </div>
+
+        <div class="heatmap-canvas-wrap">
+          <canvas id="heatmapCanvas" width="680" height="420"></canvas>
+        </div>
+        <div class="heatmap-scale">
+          <span>Dead Zone (-85 dBm)</span>
+          <div class="gradient-bar"></div>
+          <span>Excellent (-35 dBm)</span>
+        </div>
+      </div>
+
+      <!-- Room Coverage Leaderboard & Roaming Log -->
+      <div class="stack-col">
+        <!-- Smart Mesh & Router Placement Advisor -->
+        <div class="card advisor-card">
+          <div class="card-header">
+            <div>
+              <h2>Smart Mesh &amp; Router Placement Advisor</h2>
+              <p class="card-hint">Live diagnostics based on room signal drop-offs, ping jitter, and roaming handoffs</p>
+            </div>
+          </div>
+          <div class="advisor-list" id="advisorList">
+            <div class="advisor-item info">Analyzing walk-test telemetry...</div>
+          </div>
+        </div>
+
+        <!-- Room Coverage Comparison -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Room Coverage Leaderboard</h2>
+              <p class="card-hint">Automatically aggregated coverage, latency, and throughput for every room visited</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Room</th>
+                  <th>Avg Signal</th>
+                  <th>Min / Max</th>
+                  <th>Ping / Jitter</th>
+                  <th>Link / Real Speed</th>
+                  <th>Rating</th>
+                </tr>
+              </thead>
+              <tbody id="roomStatsBody">
+                <tr><td colspan="6" class="empty-cell">Collecting samples...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Mesh / AP Roaming Events Log -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Mesh / AP Roaming &amp; Band Steering Log</h2>
+              <p class="card-hint">Detects when your laptop switches BSSIDs, channels, or frequency bands</p>
+            </div>
+            <span class="pill-count" id="roamCountBadge">0 Roams</span>
+          </div>
+          <div class="table-wrap roam-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Room</th>
+                  <th>Event</th>
+                  <th>From &rarr; To</th>
+                  <th>Signal Change</th>
+                </tr>
+              </thead>
+              <tbody id="roamingLogBody">
+                <tr><td colspan="5" class="empty-cell">No AP roaming or channel switches detected yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Row 4: Channel Congestion & Neighboring Networks -->
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <h2>Channel Congestion &amp; Neighboring Wi-Fi Networks</h2>
+          <p class="card-hint">See nearby networks across 2.4 GHz, 5 GHz, and 6 GHz bands to spot co-channel interference</p>
+        </div>
+        <div class="neighbor-actions">
+          <span class="band-pill" id="bandCount24">2.4 GHz: 0</span>
+          <span class="band-pill" id="bandCount5">5 GHz: 0</span>
+          <span class="band-pill" id="bandCount6">6 GHz: 0</span>
+          <button class="btn btn-primary" id="btnScanNeighbors">Scan Nearby Networks</button>
+        </div>
+      </div>
+
+      <div class="grid-two-col neighbor-grid">
+        <div class="channel-chart-box">
+          <h3>Channel Spectrum &amp; Congestion</h3>
+          <canvas id="channelCanvas" width="540" height="240"></canvas>
+        </div>
+
+        <div class="table-wrap neighbor-table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>SSID</th>
+                <th>BSSID</th>
+                <th>Signal</th>
+                <th>Band</th>
+                <th>Ch</th>
+                <th>Radio</th>
+              </tr>
+            </thead>
+            <tbody id="neighborTableBody">
+              <tr><td colspan="6" class="empty-cell">Click "Scan Nearby Networks" to refresh visible BSSIDs.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
