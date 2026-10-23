@@ -44,6 +44,10 @@ from typing import Any, Dict, List, Optional, Tuple
 # Flag to hide console window when spawning background commands on Windows
 CREATE_NO_WINDOW = 0x08000000
 
+# How often to ask the driver for a background scan so its cached RSSI stays fresh.
+# A full scan takes ~2-4s and briefly adds latency, so faster than this doesn't help.
+RSSI_REFRESH_SCAN_INTERVAL_S = 3.0
+
 
 # ============================================================================
 # ctypes Structures for Windows Native Wi-Fi (wlanapi.dll) & IP Helper (iphlpapi.dll)
@@ -264,6 +268,7 @@ class WindowsWifiScanner:
         self._cached_netsh_info: Dict[str, Any] = {}
         self._cached_neighbors: List[Dict[str, Any]] = []
         self._last_neighbor_scan: float = 0.0
+        self._last_rssi_refresh_scan: float = 0.0
 
         # Simulation state for Demo Mode
         self._sim_step: int = 0
@@ -421,6 +426,14 @@ class WindowsWifiScanner:
             guid = if_info.InterfaceGuid
             adapter_desc = if_info.strInterfaceDescription
             is_connected = if_info.isState == 1
+
+            # 0. The driver only refreshes its cached RSSI after a scan, so without
+            #    this the dBm value freezes while walking. WlanScan is asynchronous;
+            #    the fresh value is picked up by the next poll(s).
+            now = time.time()
+            if now - self._last_rssi_refresh_scan >= RSSI_REFRESH_SCAN_INTERVAL_S:
+                self._last_rssi_refresh_scan = now
+                self._wlan.WlanScan(client_handle, ctypes.byref(guid), None, None, None)
 
             # 1. Query RSSI (dBm) directly via opcode 0x10000102
             rssi_dbm = -100
