@@ -58,6 +58,8 @@ class WalkTestSession:
         self.paused: bool = False
         self.demo_mode: bool = False
         self.current_room: str = "Living Room"
+        self.floors: List[str] = ["Ground Floor", "First Floor"]
+        self.current_floor: str = self.floors[0]
         self.max_history: int = 1800  # 30 minutes at 1s interval
 
         # State collections
@@ -67,7 +69,7 @@ class WalkTestSession:
         self.heatmap_points: List[Dict[str, Any]] = []
         self.room_events: List[Dict[str, Any]] = []
         self.speed_tests: Dict[str, Dict[str, Any]] = {}
-        self.floorplan_data_url: Optional[str] = None
+        self.floorplans: Dict[str, Optional[str]] = {}  # floor name -> uploaded image data URL
 
         # Track previous AP state for roaming detection
         self._prev_bssid: Optional[str] = None
@@ -104,6 +106,7 @@ class WalkTestSession:
     def _record_reading(self, reading: Dict[str, Any]) -> None:
         with self.lock:
             reading["room"] = self.current_room
+            reading["floor"] = self.current_floor
             self.latest_reading = reading
 
             # Check for AP / Band / Channel roaming handoff
@@ -129,6 +132,7 @@ class WalkTestSession:
                             "timestamp": reading["timestamp"],
                             "iso_time": reading["iso_time"],
                             "room": self.current_room,
+                            "floor": self.current_floor,
                             "event_type": event_type,
                             "from_bssid": self._prev_bssid,
                             "to_bssid": cur_bssid,
@@ -168,8 +172,61 @@ class WalkTestSession:
                 if self.latest_reading:
                     self.latest_reading["room"] = room_name
 
+    def set_floor(self, floor_name: str) -> bool:
+        with self.lock:
+            if floor_name not in self.floors:
+                return False
+            if floor_name != self.current_floor:
+                self.current_floor = floor_name
+                if self.latest_reading:
+                    self.latest_reading["floor"] = floor_name
+            return True
+
+    def add_floor(self, floor_name: str) -> bool:
+        floor_name = floor_name.strip()[:40]
+        with self.lock:
+            if not floor_name or floor_name in self.floors:
+                return False
+            self.floors.append(floor_name)
+            self.current_floor = floor_name
+        self.save_snapshot("autosave_latest", is_auto=True)
+        return True
+
+    def rename_floor(self, old_name: str, new_name: str) -> bool:
+        new_name = new_name.strip()[:40]
+        with self.lock:
+            if old_name not in self.floors or not new_name or new_name in self.floors:
+                return False
+            self.floors[self.floors.index(old_name)] = new_name
+            if self.current_floor == old_name:
+                self.current_floor = new_name
+            if old_name in self.floorplans:
+                self.floorplans[new_name] = self.floorplans.pop(old_name)
+            for item in self.history + self.heatmap_points + self.roaming_events:
+                if item.get("floor") == old_name:
+                    item["floor"] = new_name
+            for key in [k for k in self.speed_tests if k.startswith(f"{old_name} / ")]:
+                res = self.speed_tests.pop(key)
+                res["floor"] = new_name
+                self.speed_tests[f"{new_name} / {res.get('room', '')}"] = res
+        self.save_snapshot("autosave_latest", is_auto=True)
+        return True
+
+    def remove_floor(self, floor_name: str) -> bool:
+        """Delete a floor together with its floorplan image and heatmap pins (keeps signal history)."""
+        with self.lock:
+            if floor_name not in self.floors or len(self.floors) <= 1:
+                return False
+            self.floors.remove(floor_name)
+            self.floorplans.pop(floor_name, None)
+            self.heatmap_points = [p for p in self.heatmap_points if p.get("floor") != floor_name]
+            if self.current_floor == floor_name:
+                self.current_floor = self.floors[0]
+        self.save_snapshot("autosave_latest", is_auto=True)
+        return True
+
     def add_heatmap_point(self, x: float, y: float, label: str = "") -> Dict[str, Any]:
-        """Record a floorplan heatmap sample at normalized coordinates (0.0 - 1.0)."""
+        """Record a floorplan heatmap sample on the current floor at normalized coordinates (0.0 - 1.0)."""
         with self.lock:
             live = self.latest_reading or self.scanner.read_live_signal(demo_mode=self.demo_mode)
             rssi = live.get("rssi_dbm", -70)
@@ -179,6 +236,7 @@ class WalkTestSession:
                 "x": round(max(0.0, min(1.0, float(x))), 4),
                 "y": round(max(0.0, min(1.0, float(y))), 4),
                 "room": label.strip() or self.current_room,
+                "floor": self.current_floor,
                 "rssi_dbm": rssi,
                 "signal_pct": live.get("signal_pct", 0),
                 "tx_mbps": live.get("tx_mbps", 0.0),
@@ -193,13 +251,17 @@ class WalkTestSession:
             return pt
 
     def remove_last_heatmap_point(self) -> None:
+        """Undo the most recent pin on the current floor."""
         with self.lock:
-            if self.heatmap_points:
-                self.heatmap_points.pop()
+            for i in range(len(self.heatmap_points) - 1, -1, -1):
+                if self.heatmap_points[i].get("floor") == self.current_floor:
+                    self.heatmap_points.pop(i)
+                    break
 
     def clear_heatmap(self) -> None:
+        """Clear the pins on the current floor only."""
         with self.lock:
-            self.heatmap_points.clear()
+            self.heatmap_points = [p for p in self.heatmap_points if p.get("floor") != self.current_floor]
 
     def clear_session(self) -> None:
         with self.lock:
@@ -219,7 +281,8 @@ class WalkTestSession:
         with self.lock:
             room = self.current_room
             res["room"] = room
-            self.speed_tests[room] = res
+            res["floor"] = self.current_floor
+            self.speed_tests[f"{self.current_floor} / {room}"] = res
         self.save_snapshot("autosave_latest", is_auto=True)
         return res
 
@@ -236,11 +299,13 @@ class WalkTestSession:
             payload = {
                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "current_room": self.current_room,
+                "floors": self.floors,
+                "current_floor": self.current_floor,
                 "history": self.history[-1800:],
                 "roaming_events": self.roaming_events,
                 "heatmap_points": self.heatmap_points,
                 "speed_tests": self.speed_tests,
-                "floorplan_data_url": self.floorplan_data_url,
+                "floorplans": self.floorplans,
             }
         try:
             target_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -255,12 +320,27 @@ class WalkTestSession:
             data = json.loads(path.read_text(encoding="utf-8"))
             with self.lock:
                 self.current_room = data.get("current_room", self.current_room)
+                if data.get("floors"):
+                    self.floors = list(data["floors"])
+                self.current_floor = data.get("current_floor", self.floors[0])
+                if self.current_floor not in self.floors:
+                    self.current_floor = self.floors[0]
                 self.history = data.get("history", [])
                 self.roaming_events = data.get("roaming_events", [])
                 self.heatmap_points = data.get("heatmap_points", [])
                 self.speed_tests = data.get("speed_tests", {})
-                if data.get("floorplan_data_url"):
-                    self.floorplan_data_url = data.get("floorplan_data_url")
+                self.floorplans = dict(data.get("floorplans") or {})
+
+                # Sessions saved before multi-floor support belong to the first floor
+                first = self.floors[0]
+                if data.get("floorplan_data_url") and not self.floorplans:
+                    self.floorplans[first] = data["floorplan_data_url"]
+                for item in self.history + self.heatmap_points + self.roaming_events:
+                    item.setdefault("floor", first)
+                for key in [k for k in self.speed_tests if " / " not in k]:
+                    res = self.speed_tests.pop(key)
+                    res.setdefault("floor", first)
+                    self.speed_tests[f"{res['floor']} / {key}"] = res
             return True
         except Exception as exc:
             if not silent:
@@ -286,18 +366,19 @@ class WalkTestSession:
         return files
 
     def compute_room_stats(self) -> List[Dict[str, Any]]:
-        """Aggregate signal, ping, jitter, packet loss, and throughput statistics by room."""
+        """Aggregate signal, ping, jitter, packet loss, and throughput statistics by floor + room."""
         with self.lock:
-            grouped: Dict[str, List[Dict[str, Any]]] = {}
+            grouped: Dict[tuple, List[Dict[str, Any]]] = {}
             for item in self.history:
                 if not item.get("connected"):
                     continue
-                rm = item.get("room", "Unlabeled")
-                grouped.setdefault(rm, []).append(item)
+                key = (item.get("floor", self.floors[0]), item.get("room", "Unlabeled"))
+                grouped.setdefault(key, []).append(item)
             speed_map = dict(self.speed_tests)
+            multi_floor = len(self.floors) > 1
 
         stats: List[Dict[str, Any]] = []
-        for rm, samples in grouped.items():
+        for (floor, rm), samples in grouped.items():
             rssis = [s["rssi_dbm"] for s in samples]
             txs = [s.get("tx_mbps", 0.0) for s in samples]
             bssids = sorted(list({s.get("bssid", "") for s in samples if s.get("bssid")}))
@@ -319,10 +400,12 @@ class WalkTestSession:
 
             avg_rssi = int(round(sum(rssis) / len(rssis)))
             q = classify_signal(avg_rssi)
-            sp = speed_map.get(rm)
+            sp = speed_map.get(f"{floor} / {rm}")
             stats.append(
                 {
                     "room": rm,
+                    "floor": floor,
+                    "label": f"{rm} ({floor})" if multi_floor else rm,
                     "samples": len(samples),
                     "avg_rssi_dbm": avg_rssi,
                     "min_rssi_dbm": min(rssis),
@@ -365,18 +448,38 @@ class WalkTestSession:
         high_jitter_rooms = [r for r in room_stats if (r.get("jitter_ms") or 0) > 12.0 or (r.get("loss_pct") or 0) > 5.0]
 
         if dead_rooms:
-            names = ", ".join(f"{r['room']} ({r['avg_rssi_dbm']} dBm)" for r in dead_rooms)
-            midway = fair_rooms[0]["room"] if fair_rooms else (best_rooms[-1]["room"] if best_rooms else "a central hallway")
+            names = ", ".join(f"{r['label']} ({r['avg_rssi_dbm']} dBm)" for r in dead_rooms)
+            midway = fair_rooms[0]["label"] if fair_rooms else (best_rooms[-1]["label"] if best_rooms else "a central hallway")
             recs.append(
                 {
                     "severity": "critical",
                     "title": f"Coverage Dead Zone Detected in { len(dead_rooms) } Room(s)",
-                    "detail": f"Weak signal measured in {names}. Place a Mesh Node or Wi-Fi Extender halfway between your main router and {dead_rooms[0]['room']} (ideally near {midway} where signal is still above -65 dBm).",
+                    "detail": f"Weak signal measured in {names}. Place a Mesh Node or Wi-Fi Extender halfway between your main router and {dead_rooms[0]['label']} (ideally near {midway} where signal is still above -65 dBm).",
                 }
             )
 
+        # Floor-to-floor comparison: concrete slabs often cost 10-20 dB between storeys
+        floor_avgs: Dict[str, List[int]] = {}
+        for r in room_stats:
+            floor_avgs.setdefault(r["floor"], []).append(r["avg_rssi_dbm"])
+        if len(floor_avgs) >= 2:
+            ranked = sorted(
+                ((f, int(round(sum(v) / len(v)))) for f, v in floor_avgs.items()),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            (best_floor, best_avg), (worst_floor, worst_avg) = ranked[0], ranked[-1]
+            if best_avg - worst_avg >= 8:
+                recs.append(
+                    {
+                        "severity": "warning" if worst_avg > -76 else "critical",
+                        "title": f"{worst_floor} Is {best_avg - worst_avg} dB Weaker Than {best_floor}",
+                        "detail": f"Average signal is {best_avg} dBm on {best_floor} but only {worst_avg} dBm on {worst_floor}. Floors and ceilings absorb a lot of Wi-Fi: put a mesh node on {worst_floor} (wired backhaul if possible), or move the router to a central spot near the stairs or on the upper side of {best_floor}.",
+                    }
+                )
+
         if fair_rooms and not dead_rooms:
-            names = ", ".join(f"{r['room']} ({r['avg_rssi_dbm']} dBm)" for r in fair_rooms)
+            names = ", ".join(f"{r['label']} ({r['avg_rssi_dbm']} dBm)" for r in fair_rooms)
             recs.append(
                 {
                     "severity": "warning",
@@ -387,7 +490,7 @@ class WalkTestSession:
 
         if high_jitter_rooms:
             names = ", ".join(
-                f"{r['room']} (Jitter: {r['jitter_ms']}ms, Loss: {r['loss_pct']}%)"
+                f"{r['label']} (Jitter: {r['jitter_ms']}ms, Loss: {r['loss_pct']}%)"
                 for r in high_jitter_rooms
             )
             recs.append(
@@ -415,7 +518,7 @@ class WalkTestSession:
                 {
                     "severity": "good",
                     "title": "Strong Whole-Home Wi-Fi Coverage!",
-                    "detail": f"All {len(room_stats)} tested room(s) maintain healthy signal levels (best: {best['room']} at {best['avg_rssi_dbm']} dBm, {best['avg_tx_mbps']} Mbps link speed) with low jitter.",
+                    "detail": f"All {len(room_stats)} tested room(s) maintain healthy signal levels (best: {best['label']} at {best['avg_rssi_dbm']} dBm, {best['avg_tx_mbps']} Mbps link speed) with low jitter.",
                 }
             )
 
@@ -467,6 +570,8 @@ class WalkTestSession:
                 "paused": self.paused,
                 "demo_mode": self.demo_mode,
                 "current_room": self.current_room,
+                "floors": list(self.floors),
+                "current_floor": self.current_floor,
             },
             "latest": latest,
             "session": session_summary,
@@ -489,6 +594,7 @@ class WalkTestSession:
             [
                 "Timestamp",
                 "Time",
+                "Floor",
                 "Room",
                 "SSID",
                 "BSSID",
@@ -512,6 +618,7 @@ class WalkTestSession:
                 [
                     round(r.get("timestamp", 0), 2),
                     r.get("iso_time", ""),
+                    r.get("floor", ""),
                     r.get("room", ""),
                     r.get("ssid", ""),
                     r.get("bssid", ""),
@@ -586,7 +693,7 @@ class WifiScannerHTTPHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/floorplan":
-            self._send_json({"floorplan_data_url": walk_session.floorplan_data_url})
+            self._send_json({"floorplans": walk_session.floorplans})
             return
 
         if path == "/api/sessions":
@@ -648,6 +755,22 @@ class WifiScannerHTTPHandler(BaseHTTPRequestHandler):
             room = str(body.get("room", "Living Room"))
             walk_session.set_room(room)
             self._send_json({"ok": True, "current_room": walk_session.current_room})
+            return
+
+        if path == "/api/floor":
+            action = body.get("action", "select")
+            name = str(body.get("name", ""))
+            if action == "add":
+                ok = walk_session.add_floor(name)
+            elif action == "rename":
+                ok = walk_session.rename_floor(name, str(body.get("new_name", "")))
+            elif action == "remove":
+                ok = walk_session.remove_floor(name)
+            else:
+                ok = walk_session.set_floor(name)
+            self._send_json(
+                {"ok": ok, "floors": walk_session.floors, "current_floor": walk_session.current_floor}
+            )
             return
 
         if path == "/api/config":
@@ -717,8 +840,13 @@ class WifiScannerHTTPHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/floorplan":
-            walk_session.floorplan_data_url = body.get("floorplan_data_url")
-            walk_session.save_snapshot("autosave_latest", is_auto=True)
+            floor = str(body.get("floor") or walk_session.current_floor)
+            if floor in walk_session.floors:
+                if body.get("floorplan_data_url"):
+                    walk_session.floorplans[floor] = body["floorplan_data_url"]
+                else:
+                    walk_session.floorplans.pop(floor, None)
+                walk_session.save_snapshot("autosave_latest", is_auto=True)
             self._send_json({"ok": True})
             return
 

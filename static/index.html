@@ -143,7 +143,7 @@
           </div>
           <div class="room-header-actions">
             <div class="active-room-pill">
-              Location: <strong id="activeRoomLabel">Living Room</strong>
+              Location: <strong id="activeFloorLabel">Ground Floor</strong> · <strong id="activeRoomLabel">Living Room</strong>
             </div>
             <button class="btn btn-primary" id="btnSpeedTest" title="Measure actual download throughput (Mbps) in the current room">
               ⚡ Test Room Speed
@@ -214,7 +214,16 @@
               Default Blueprint
             </button>
             <button class="btn btn-secondary" id="btnUndoPoint">Undo Pin</button>
-            <button class="btn btn-secondary" id="btnClearHeatmap">Clear Map</button>
+            <button class="btn btn-secondary" id="btnClearHeatmap" title="Remove all pins on this floor">Clear Floor</button>
+          </div>
+        </div>
+
+        <div class="floor-bar">
+          <div class="floor-tabs" id="floorTabs"></div>
+          <div class="floor-actions">
+            <button class="btn btn-sm btn-secondary" id="btnAddFloor" title="Add another floor (e.g. Basement, Attic)">+ Floor</button>
+            <button class="btn btn-sm btn-secondary" id="btnRenameFloor" title="Rename the selected floor">Rename</button>
+            <button class="btn btn-sm btn-secondary" id="btnRemoveFloor" title="Delete the selected floor with its floorplan and pins">Remove</button>
           </div>
         </div>
 

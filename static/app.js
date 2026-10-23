@@ -11,6 +11,8 @@ const state = {
   audioEnabled: false,
   voiceEnabled: false,
   currentRoom: "Living Room",
+  floors: ["Ground Floor"],
+  currentFloor: "Ground Floor",
   latest: null,
   history: [],
   roomStats: [],
@@ -20,7 +22,7 @@ const state = {
   heatmapPoints: [],
   neighbors: [],
   channelUsage: { band_counts: {}, channels: [] },
-  customFloorplanImg: null,
+  floorplanImgs: {}, // floor name -> uploaded Image
   lastRoamCount: 0,
   lastDeadZoneSpokenAt: 0,
 };
@@ -34,7 +36,7 @@ let audioCtx = null;
 
 window.addEventListener("DOMContentLoaded", () => {
   bindControls();
-  restorePersistedFloorplan();
+  restorePersistedFloorplans();
   startPolling();
   fetchNeighbors(false);
 });
@@ -106,7 +108,7 @@ function bindControls() {
     if (!filename) return;
     const res = await postJSON("/api/session/load", { filename });
     if (res && res.ok) {
-      await restorePersistedFloorplan();
+      await restorePersistedFloorplans();
       await fetchStatus();
       speakText(`Loaded session ${filename}`);
     }
@@ -203,28 +205,70 @@ function bindControls() {
     }
   });
 
-  // Custom Floorplan Upload
+  // Custom Floorplan Upload (applies to the selected floor)
   document.getElementById("floorplanUpload").addEventListener("change", (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    const floor = state.currentFloor;
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const dataUrl = ev.target.result;
       const img = new Image();
       img.onload = () => {
-        state.customFloorplanImg = img;
+        state.floorplanImgs[floor] = img;
         drawFloorplanHeatmap();
       };
       img.src = dataUrl;
-      await postJSON("/api/floorplan", { floorplan_data_url: dataUrl });
+      await postJSON("/api/floorplan", { floor, floorplan_data_url: dataUrl });
     };
     reader.readAsDataURL(file);
+    e.target.value = "";
   });
 
   document.getElementById("btnResetFloorplan").addEventListener("click", async () => {
-    state.customFloorplanImg = null;
+    const floor = state.currentFloor;
+    delete state.floorplanImgs[floor];
     drawFloorplanHeatmap();
-    await postJSON("/api/floorplan", { floorplan_data_url: null });
+    await postJSON("/api/floorplan", { floor, floorplan_data_url: null });
+  });
+
+  // Floor tabs & management
+  document.getElementById("floorTabs").addEventListener("click", async (e) => {
+    const btn = e.target.closest(".room-btn");
+    if (!btn || btn.dataset.floor === state.currentFloor) return;
+    await floorAction({ action: "select", name: btn.dataset.floor });
+    speakText(`${state.currentFloor}.`);
+  });
+
+  document.getElementById("btnAddFloor").addEventListener("click", async () => {
+    const name = (window.prompt("New floor name (e.g. Basement, Attic):") || "").trim();
+    if (!name) return;
+    const res = await floorAction({ action: "add", name });
+    if (res && !res.ok) window.alert(`A floor named "${name}" already exists.`);
+  });
+
+  document.getElementById("btnRenameFloor").addEventListener("click", async () => {
+    const oldName = state.currentFloor;
+    const newName = (window.prompt(`Rename "${oldName}" to:`, oldName) || "").trim();
+    if (!newName || newName === oldName) return;
+    const res = await floorAction({ action: "rename", name: oldName, new_name: newName });
+    if (res && res.ok && state.floorplanImgs[oldName]) {
+      state.floorplanImgs[newName] = state.floorplanImgs[oldName];
+      delete state.floorplanImgs[oldName];
+      drawFloorplanHeatmap();
+    }
+  });
+
+  document.getElementById("btnRemoveFloor").addEventListener("click", async () => {
+    const name = state.currentFloor;
+    if (state.floors.length <= 1) {
+      window.alert("You need at least one floor.");
+      return;
+    }
+    if (!window.confirm(`Remove "${name}" with its floorplan and heatmap pins? Signal history is kept.`)) return;
+    const res = await floorAction({ action: "remove", name });
+    if (res && res.ok) delete state.floorplanImgs[name];
+    await fetchStatus();
   });
 
   // Scan Nearby Networks
@@ -233,20 +277,53 @@ function bindControls() {
   });
 }
 
-async function restorePersistedFloorplan() {
+async function restorePersistedFloorplans() {
   try {
     const res = await fetch("/api/floorplan");
     if (!res.ok) return;
     const data = await res.json();
-    if (data && data.floorplan_data_url) {
+    state.floorplanImgs = {};
+    Object.entries((data && data.floorplans) || {}).forEach(([floor, dataUrl]) => {
+      if (!dataUrl) return;
       const img = new Image();
       img.onload = () => {
-        state.customFloorplanImg = img;
+        state.floorplanImgs[floor] = img;
         drawFloorplanHeatmap();
       };
-      img.src = data.floorplan_data_url;
-    }
+      img.src = dataUrl;
+    });
+    drawFloorplanHeatmap();
   } catch (_) {}
+}
+
+async function floorAction(payload) {
+  const res = await postJSON("/api/floor", payload);
+  if (res && res.floors) {
+    applyFloorConfig(res.floors, res.current_floor);
+    drawFloorplanHeatmap();
+  }
+  return res;
+}
+
+function applyFloorConfig(floors, currentFloor) {
+  state.floors = floors;
+  state.currentFloor = currentFloor;
+  document.getElementById("activeFloorLabel").textContent = currentFloor;
+  renderFloorTabs();
+}
+
+function renderFloorTabs() {
+  const container = document.getElementById("floorTabs");
+  const counts = {};
+  (state.heatmapPoints || []).forEach((pt) => {
+    counts[pt.floor] = (counts[pt.floor] || 0) + 1;
+  });
+  const html = state.floors
+    .map(
+      (f) => `<button class="room-btn${f === state.currentFloor ? " active" : ""}" data-floor="${escapeHtml(f)}">${escapeHtml(f)}<span class="floor-tab-count">${counts[f] || 0} pins</span></button>`
+    )
+    .join("");
+  if (container.innerHTML !== html) container.innerHTML = html;
 }
 
 function speakText(text) {
@@ -338,6 +415,7 @@ async function fetchStatus() {
       state.demoMode = data.config.demo_mode;
       state.currentRoom = data.config.current_room;
       document.getElementById("activeRoomLabel").textContent = state.currentRoom;
+      if (data.config.floors) applyFloorConfig(data.config.floors, data.config.current_floor);
       updateControlButtons();
     }
 
@@ -520,7 +598,9 @@ function renderRoomLeaderboard(stats) {
         : `${s.avg_tx_mbps} Mbps`;
       return `
       <tr>
-        <td><strong>${escapeHtml(s.room)}</strong> <span style="color:#64748b;font-size:0.72rem">(${s.samples})</span></td>
+        <td><strong>${escapeHtml(s.room)}</strong> <span style="color:#64748b;font-size:0.72rem">(${s.samples})</span>${
+          state.floors.length > 1 ? `<br><span style="color:#94a3b8;font-size:0.72rem">${escapeHtml(s.floor || "")}</span>` : ""
+        }</td>
         <td class="mono" style="color:${s.quality_color};font-weight:700">${s.avg_rssi_dbm} dBm</td>
         <td class="mono">${s.min_rssi_dbm} / ${s.max_rssi_dbm} dBm</td>
         <td class="mono">${pingStr} ${jitStr}${lossStr}</td>
@@ -550,7 +630,7 @@ function renderRoamingLog(events) {
       return `
         <tr>
           <td class="mono">${escapeHtml(ev.iso_time)}</td>
-          <td>${escapeHtml(ev.room)}</td>
+          <td>${escapeHtml(ev.room)}${state.floors.length > 1 && ev.floor ? ` <span style="color:#94a3b8;font-size:0.72rem">(${escapeHtml(ev.floor)})</span>` : ""}</td>
           <td><strong>${escapeHtml(ev.event_type)}</strong></td>
           <td class="mono">${escapeHtml(ev.from_bssid)} &rarr; ${escapeHtml(ev.to_bssid)}</td>
           <td class="mono" style="color:${diffColor}">${ev.rssi_before} &rarr; ${ev.rssi_after} dBm (${diffStr})</td>
@@ -786,17 +866,32 @@ function drawFloorplanHeatmap() {
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
 
-  // 1. Draw either uploaded floorplan image or default house architectural grid
-  if (state.customFloorplanImg) {
-    ctx.drawImage(state.customFloorplanImg, 0, 0, w, h);
+  // 1. Draw the selected floor's uploaded floorplan image or a default blueprint
+  const floorIdx = Math.max(0, state.floors.indexOf(state.currentFloor));
+  const floorImg = state.floorplanImgs[state.currentFloor];
+  if (floorImg) {
+    ctx.drawImage(floorImg, 0, 0, w, h);
     ctx.fillStyle = "rgba(9, 14, 26, 0.35)";
     ctx.fillRect(0, 0, w, h);
   } else {
-    drawDefaultHouseBlueprint(ctx, w, h);
+    drawDefaultHouseBlueprint(ctx, w, h, floorIdx);
   }
 
-  // 2. Render radial thermal heatmap blobs for each recorded measurement point
-  const points = state.heatmapPoints || [];
+  // Floor name badge (bottom-right corner)
+  ctx.font = "bold 12px Segoe UI, sans-serif";
+  const badge = state.currentFloor;
+  const bw = ctx.measureText(badge).width + 16;
+  ctx.fillStyle = "rgba(79, 70, 229, 0.85)";
+  ctx.fillRect(w - bw - 10, h - 30, bw, 20);
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.fillText(badge, w - bw / 2 - 10, h - 16);
+
+  // 2. Render radial thermal heatmap blobs for each measurement point on this floor
+  const firstFloor = state.floors[0];
+  const points = (state.heatmapPoints || []).filter(
+    (pt) => (pt.floor || firstFloor) === state.currentFloor
+  );
   points.forEach((pt) => {
     const px = pt.x * w;
     const py = pt.y * h;
@@ -843,7 +938,7 @@ function drawFloorplanHeatmap() {
   });
 }
 
-function drawDefaultHouseBlueprint(ctx, w, h) {
+function drawDefaultHouseBlueprint(ctx, w, h, floorIdx = 0) {
   // Subtle blueprint grid
   ctx.strokeStyle = "rgba(56, 189, 248, 0.08)";
   ctx.lineWidth = 1;
@@ -860,8 +955,8 @@ function drawDefaultHouseBlueprint(ctx, w, h) {
     ctx.stroke();
   }
 
-  // House rooms layout boxes
-  const rooms = [
+  // House rooms layout boxes (ground floor plan, or a generic upper-floor plan)
+  const groundRooms = [
     { name: "Living Room", x: 24, y: 24, rw: 260, rh: 185 },
     { name: "Kitchen", x: 284, y: 24, rw: 180, rh: 185 },
     { name: "Patio / Yard", x: 464, y: 24, rw: 192, rh: 185 },
@@ -871,6 +966,16 @@ function drawDefaultHouseBlueprint(ctx, w, h) {
     { name: "Bathroom", x: 384, y: 261, rw: 80, rh: 135 },
     { name: "Home Office / Garage", x: 464, y: 209, rw: 192, rh: 187 },
   ];
+  const upperRooms = [
+    { name: "Master Bedroom", x: 24, y: 24, rw: 260, rh: 185 },
+    { name: "Bathroom", x: 284, y: 24, rw: 120, rh: 185 },
+    { name: "Bedroom 2", x: 404, y: 24, rw: 252, rh: 185 },
+    { name: "Landing / Stairs", x: 24, y: 209, rw: 632, rh: 52 },
+    { name: "Bedroom 3", x: 24, y: 261, rw: 215, rh: 135 },
+    { name: "Home Office", x: 239, y: 261, rw: 225, rh: 135 },
+    { name: "Balcony", x: 464, y: 261, rw: 192, rh: 135 },
+  ];
+  const rooms = floorIdx === 0 ? groundRooms : upperRooms;
 
   ctx.strokeStyle = "rgba(148, 163, 184, 0.45)";
   ctx.lineWidth = 2;
