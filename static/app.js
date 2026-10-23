@@ -859,16 +859,34 @@ function drawTimelineChart(history) {
   }
 }
 
+const HEATMAP_BASE_WIDTH = 680;
+const HEATMAP_DEFAULT_HEIGHT = 420;
+
+// Match the canvas (and its card) to the floorplan image's shape so portrait
+// plans aren't squashed into a landscape box. Pins are stored as 0..1 fractions,
+// so they stay in place when the shape changes.
+function sizeHeatmapCanvas(canvas, floorImg) {
+  const ratio = floorImg && floorImg.naturalWidth && floorImg.naturalHeight
+    ? floorImg.naturalWidth / floorImg.naturalHeight
+    : HEATMAP_BASE_WIDTH / HEATMAP_DEFAULT_HEIGHT;
+  const height = Math.round(HEATMAP_BASE_WIDTH / ratio);
+  if (canvas.width !== HEATMAP_BASE_WIDTH) canvas.width = HEATMAP_BASE_WIDTH;
+  if (canvas.height !== height) canvas.height = height;
+  // Cap the on-screen height for tall plans; the wrap narrows to keep the ratio
+  canvas.parentElement.style.maxWidth = `calc(75vh * ${ratio.toFixed(4)})`;
+}
+
 function drawFloorplanHeatmap() {
   const canvas = document.getElementById("heatmapCanvas");
   const ctx = canvas.getContext("2d");
+  const floorImg = state.floorplanImgs[state.currentFloor];
+  sizeHeatmapCanvas(canvas, floorImg);
   const w = canvas.width;
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
 
   // 1. Draw the selected floor's uploaded floorplan image or a default blueprint
   const floorIdx = Math.max(0, state.floors.indexOf(state.currentFloor));
-  const floorImg = state.floorplanImgs[state.currentFloor];
   if (floorImg) {
     ctx.drawImage(floorImg, 0, 0, w, h);
     ctx.fillStyle = "rgba(9, 14, 26, 0.35)";

@@ -476,6 +476,7 @@ body {
 .heatmap-canvas-wrap {
   position: relative;
   width: 100%;
+  margin: 0 auto; /* max-width is set from the floorplan's aspect ratio in app.js */
   background: #090e1a;
   border: 1px solid var(--border-color);
   border-radius: 10px;
